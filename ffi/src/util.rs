@@ -45,6 +45,19 @@ pub fn py_to_socketaddr(t: &PyTuple) -> PyResult<SocketAddr> {
     }
 }
 
+pub fn ipaddr_to_py(py: Python, addr: IpAddr) -> PyObject {
+    match addr {
+        IpAddr::V4(addr) => addr.to_string().into_py(py),
+        IpAddr::V6(addr) => {
+            log::debug!(
+                "Converting IPv6 address to Python equivalent (not sure if this is correct): {:?}",
+                addr.to_string()
+            );
+            addr.to_string().into_py(py)
+        }
+    }
+}
+
 pub fn event_queue_unavailable<T>(_: mpsc::error::SendError<T>) -> PyErr {
     PyOSError::new_err("Server has been shut down.")
 }

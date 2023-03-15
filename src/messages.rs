@@ -48,6 +48,14 @@ pub enum TransportEvent {
         dst_addr: SocketAddr,
         tunnel_info: TunnelInfo,
     },
+    IcmpEchoRequestReceived {
+        ident: u16,
+        seq_no: u16,
+        data: Vec<u8>,
+        src_addr: IpAddr,
+        dst_addr: IpAddr,
+        tunnel_info: TunnelInfo,
+    },
 }
 
 /// Commands that are sent by the Python side to the TCP stack.
@@ -61,6 +69,13 @@ pub enum TransportCommand {
         data: Vec<u8>,
         src_addr: SocketAddr,
         dst_addr: SocketAddr,
+    },
+    SendIcmpEchoReply {
+        ident: u16,
+        seq_no: u16,
+        data: Vec<u8>,
+        src_addr: IpAddr,
+        dst_addr: IpAddr,
     },
 }
 

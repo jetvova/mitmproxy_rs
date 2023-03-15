@@ -1,20 +1,21 @@
 use std::cmp;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use anyhow::Result;
 use pretty_hex::pretty_hex;
 use smoltcp::iface::{Config, SocketSet};
 use smoltcp::socket::{tcp, Socket};
 
+use smoltcp::wire::{Icmpv4Message, Icmpv6Packet};
 use smoltcp::{
     iface::{Interface, SocketHandle},
     phy::ChecksumCapabilities,
     time::{Duration, Instant},
     wire::{
-        IpAddress, IpCidr, IpProtocol, IpRepr, Ipv4Address, Ipv4Packet, Ipv4Repr, Ipv6Address,
-        Ipv6Packet, Ipv6Repr, TcpPacket, UdpPacket, UdpRepr,
+        Icmpv4Packet, Icmpv4Repr, Icmpv6Repr, IpAddress, IpCidr, IpProtocol, IpRepr, Ipv4Address,
+        Ipv4Packet, Ipv4Repr, Ipv6Address, Ipv6Packet, Ipv6Repr, TcpPacket, UdpPacket, UdpRepr,
     },
 };
 use tokio::sync::{
@@ -105,6 +106,7 @@ impl<'a> NetworkIO<'a> {
         match packet.transport_protocol() {
             IpProtocol::Tcp => self.receive_packet_tcp(packet, tunnel_info, permit),
             IpProtocol::Udp => self.receive_packet_udp(packet, tunnel_info, permit),
+            IpProtocol::Icmp => self.receive_packet_icmp(packet, tunnel_info, permit),
             _ => {
                 log::debug!(
                     "Received IP packet for unknown protocol: {}",
@@ -220,6 +222,42 @@ impl<'a> NetworkIO<'a> {
         Ok(())
     }
 
+    fn receive_packet_icmp(
+        &mut self,
+        mut packet: IpPacket,
+        tunnel_info: TunnelInfo,
+        permit: Permit<'_, TransportEvent>,
+    ) -> Result<()> {
+        let src_addr = packet.src_ip();
+        let dst_addr = packet.dst_ip();
+
+        let mut icmpv4_packet = match Icmpv4Packet::new_checked(packet.payload_mut()) {
+            Ok(p) => p,
+            Err(e) => {
+                log::debug!("Received invalid ICMP packet: {}", e);
+                return Ok(());
+            }
+        };
+        match icmpv4_packet.msg_type() {
+            Icmpv4Message::EchoRequest => {
+                let event = TransportEvent::IcmpEchoRequestReceived {
+                    ident: icmpv4_packet.echo_ident(),
+                    seq_no: icmpv4_packet.echo_seq_no(),
+                    data: icmpv4_packet.data_mut().to_vec(),
+                    src_addr,
+                    dst_addr,
+                    tunnel_info,
+                };
+                permit.send(event);
+            }
+            t => {
+                log::debug!("Unsupported ICMP packet of type: {}", t);
+            }
+        }
+
+        Ok(())
+    }
+
     fn read_data(&mut self, id: ConnectionId, n: u32, tx: oneshot::Sender<Vec<u8>>) {
         if let Some(data) = self.socket_data.get_mut(&id) {
             assert!(data.recv_waiter.is_none());
@@ -329,6 +367,92 @@ impl<'a> NetworkIO<'a> {
         permit.send(NetworkCommand::SendPacket(ip_packet));
     }
 
+    fn send_icmp_echo_reply(
+        &mut self,
+        ident: u16,
+        seq_no: u16,
+        data: Vec<u8>,
+        src_addr: IpAddr,
+        dst_addr: IpAddr,
+    ) {
+        let permit = match self.net_tx.try_reserve() {
+            Ok(p) => p,
+            Err(_) => {
+                log::debug!("Channel full, discarding ICMP packet.");
+                return;
+            }
+        };
+
+        let ip_packet: IpPacket = match (src_addr, dst_addr) {
+            (IpAddr::V4(src_addr), IpAddr::V4(dst_addr)) => {
+                let icmp_repr = Icmpv4Repr::EchoReply {
+                    ident,
+                    seq_no,
+                    data: &data,
+                };
+
+                let ip_repr = Ipv4Repr {
+                    src_addr: Ipv4Address::from(src_addr),
+                    dst_addr: Ipv4Address::from(dst_addr),
+                    next_header: IpProtocol::Icmp,
+                    payload_len: icmp_repr.buffer_len(),
+                    hop_limit: 255,
+                };
+
+                let buf = vec![0u8; ip_repr.buffer_len() + icmp_repr.buffer_len()];
+
+                let mut packet = Ipv4Packet::new_unchecked(buf);
+                ip_repr.emit(&mut packet, &ChecksumCapabilities::default());
+                let mut ip_packet = IpPacket::from(packet);
+
+                icmp_repr.emit(
+                    &mut Icmpv4Packet::new_unchecked(ip_packet.payload_mut()),
+                    &ChecksumCapabilities::default(),
+                );
+
+                ip_packet
+            }
+            (IpAddr::V6(src_addr), IpAddr::V6(dst_addr)) => {
+                let icmp_repr = Icmpv6Repr::EchoReply {
+                    ident,
+                    seq_no,
+                    data: &data,
+                };
+
+                let ip_repr = Ipv6Repr {
+                    src_addr: Ipv6Address::from(src_addr),
+                    dst_addr: Ipv6Address::from(dst_addr),
+                    next_header: IpProtocol::Icmp,
+                    payload_len: icmp_repr.buffer_len(),
+                    hop_limit: 255,
+                };
+
+                let buf = vec![0u8; ip_repr.buffer_len() + icmp_repr.buffer_len()];
+
+                let mut packet = Ipv6Packet::new_unchecked(buf);
+                ip_repr.emit(&mut packet);
+                let mut ip_packet = IpPacket::from(packet);
+
+                icmp_repr.emit(
+                    &IpAddress::from(src_addr),
+                    &IpAddress::from(dst_addr),
+                    &mut Icmpv6Packet::new_unchecked(ip_packet.payload_mut()),
+                    &ChecksumCapabilities::default(),
+                );
+
+                ip_packet
+            }
+            _ => {
+                log::error!(
+                    "Failed to assemble ICMP echo reply packet: mismatched IP address versions"
+                );
+                return;
+            }
+        };
+
+        permit.send(NetworkCommand::SendPacket(ip_packet));
+    }
+
     fn handle_network_event(
         &mut self,
         event: NetworkEvent,
@@ -365,6 +489,15 @@ impl<'a> NetworkIO<'a> {
                 dst_addr,
             } => {
                 self.send_datagram(data, src_addr, dst_addr);
+            }
+            TransportCommand::SendIcmpEchoReply {
+                ident,
+                seq_no,
+                data,
+                src_addr,
+                dst_addr,
+            } => {
+                self.send_icmp_echo_reply(ident, seq_no, data, src_addr, dst_addr);
             }
         }
     }

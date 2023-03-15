@@ -8,8 +8,9 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use mitmproxy::messages::{TransportCommand, TransportEvent};
 
 use crate::datagram_transport::DatagramTransport;
+use crate::icmp_transport::IcmpTransport;
 use crate::tcp_stream::TcpStream;
-use crate::util::socketaddr_to_py;
+use crate::util::{ipaddr_to_py, socketaddr_to_py};
 
 pub struct PyInteropTask {
     py_loop: PyObject,
@@ -17,6 +18,7 @@ pub struct PyInteropTask {
     smol_to_py_rx: mpsc::Receiver<TransportEvent>,
     py_tcp_handler: PyObject,
     py_udp_handler: PyObject,
+    py_icmp_echo_handler: PyObject,
     sd_watcher: broadcast::Receiver<()>,
 }
 
@@ -28,6 +30,7 @@ impl PyInteropTask {
         smol_to_py_rx: mpsc::Receiver<TransportEvent>,
         py_tcp_handler: PyObject,
         py_udp_handler: PyObject,
+        py_icmp_echo_handler: PyObject,
         sd_watcher: broadcast::Receiver<()>,
     ) -> Self {
         PyInteropTask {
@@ -36,6 +39,7 @@ impl PyInteropTask {
             smol_to_py_rx,
             py_tcp_handler,
             py_udp_handler,
+            py_icmp_echo_handler,
             sd_watcher,
         }
     }
@@ -127,6 +131,43 @@ impl PyInteropTask {
                                             bytes,
                                             socketaddr_to_py(py, src_addr),
                                             socketaddr_to_py(py, dst_addr),
+                                        ),
+                                    ) {
+                                        err.print(py);
+                                    }
+                                });
+                            },
+                            TransportEvent::IcmpEchoRequestReceived {
+                                ident,
+                                seq_no,
+                                data,
+                                src_addr,
+                                dst_addr,
+                                tunnel_info,
+                            } => {
+
+                                log::debug!("ICMP ECHO REQUEST, ident: {:?}, seq_no: {:?}, {:?} --> {:?}", ident, seq_no, src_addr, dst_addr);
+                                let transport = IcmpTransport {
+                                    event_tx: self.py_to_smol_tx.clone(),
+                                    src_addr,
+                                    dst_addr,
+                                    tunnel_info,
+                                };
+
+                                Python::with_gil(|py| {
+                                    let bytes: Py<PyBytes> = PyBytes::new(py, &data).into_py(py);
+
+                                    if let Err(err) = self.py_loop.call_method1(
+                                        py,
+                                        "call_soon_threadsafe",
+                                        (
+                                            self.py_icmp_echo_handler.as_ref(py),
+                                            transport.into_py(py),
+                                            ident.into_py(py),
+                                            seq_no.into_py(py),
+                                            bytes,
+                                            ipaddr_to_py(py, src_addr),
+                                            ipaddr_to_py(py, dst_addr),
                                         ),
                                     ) {
                                         err.print(py);

@@ -57,6 +57,7 @@ impl Server {
         packet_source_conf: T,
         py_tcp_handler: PyObject,
         py_udp_handler: PyObject,
+        py_icmp_echo_handler: PyObject,
     ) -> Result<(Self, T::Data)>
     where
         T: PacketSourceConf,
@@ -105,6 +106,7 @@ impl Server {
             smol_to_py_rx,
             py_tcp_handler,
             py_udp_handler,
+            py_icmp_echo_handler,
             sd_trigger.subscribe(),
         );
 
@@ -231,6 +233,7 @@ impl WireGuardServer {
 /// - `peer_public_keys`: List of public X25519 keys for WireGuard peers as base64-encoded strings.
 /// - `handle_connection`: A coroutine that will be called for each new `TcpStream`.
 /// - `receive_datagram`: A function that will be called for each received UDP datagram.
+/// - `receive_icmp_echo_request`: A function that will be called for each received ICMP echo request.
 ///
 /// The `receive_datagram` function will be called with the following arguments:
 ///
@@ -246,6 +249,7 @@ pub fn start_wireguard_server(
     peer_public_keys: Vec<String>,
     handle_connection: PyObject,
     receive_datagram: PyObject,
+    receive_icmp_echo_request: PyObject,
 ) -> PyResult<&PyAny> {
     let private_key = string_to_key(private_key)?;
 
@@ -262,7 +266,13 @@ pub fn start_wireguard_server(
     };
 
     pyo3_asyncio::tokio::future_into_py(py, async move {
-        let (server, local_addr) = Server::init(conf, handle_connection, receive_datagram).await?;
+        let (server, local_addr) = Server::init(
+            conf,
+            handle_connection,
+            receive_datagram,
+            receive_icmp_echo_request,
+        )
+        .await?;
         Ok(WireGuardServer { server, local_addr })
     })
 }
@@ -276,6 +286,7 @@ pub fn start_os_proxy(
     py: Python<'_>,
     handle_connection: PyObject,
     receive_datagram: PyObject,
+    receive_icmp_echo_request: PyObject,
 ) -> PyResult<&PyAny> {
     #[cfg(windows)]
     {
@@ -293,7 +304,13 @@ pub fn start_os_proxy(
         }
         let conf = WindowsConf { executable_path };
         pyo3_asyncio::tokio::future_into_py(py, async move {
-            let (server, conf_tx) = Server::init(conf, handle_connection, receive_datagram).await?;
+            let (server, conf_tx) = Server::init(
+                conf,
+                handle_connection,
+                receive_datagram,
+                receive_icmp_echo_request,
+            )
+            .await?;
 
             Ok(OsProxy { server, conf_tx })
         })

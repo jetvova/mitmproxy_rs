@@ -46,6 +46,7 @@ async def main():
         [client_keypair[1]],
         handle_connection,
         receive_datagram,
+        receive_icmp_echo_request,
     )
 
     print(

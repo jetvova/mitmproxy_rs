@@ -12,6 +12,7 @@ async def start_wireguard_server(
     peer_public_keys: list[str],
     handle_connection: Callable[[TcpStream], Awaitable[None]],
     receive_datagram: Callable[[DatagramTransport, bytes, tuple[str, int], tuple[str, int]], None],
+    receive_icmp_echo_request: Callable[[IcmpTransport, int, int, bytes, str, str], None],
 ) -> WireGuardServer: ...
 
 @final

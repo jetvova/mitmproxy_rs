@@ -6,6 +6,7 @@ use once_cell::sync::Lazy;
 use pyo3::{exceptions::PyException, prelude::*};
 
 mod datagram_transport;
+mod icmp_transport;
 mod server;
 mod task;
 mod tcp_stream;
